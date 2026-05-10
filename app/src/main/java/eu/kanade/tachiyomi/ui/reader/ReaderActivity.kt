@@ -678,7 +678,7 @@ class ReaderActivity : BaseActivity() {
      * actions to perform is shown.
      */
     fun onPageLongTap(page: ReaderPage) {
-        viewModel.openPageDialog(page)
+        Toast.makeText(this, "Long tap: page ${page.number}", Toast.LENGTH_SHORT).show()
     }
 
     /**
