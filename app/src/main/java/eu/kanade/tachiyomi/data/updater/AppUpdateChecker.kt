@@ -18,33 +18,34 @@ class AppUpdateChecker {
         //     return GetApplicationRelease.Result.OsTooOld
         // }
 
-        return withIOContext {
-            val result = getApplicationRelease.await(
-                GetApplicationRelease.Arguments(
-                    isFossBuildType,
-                    isPreviewBuildType,
-                    BuildConfig.COMMIT_COUNT.toInt(),
-                    BuildConfig.VERSION_NAME,
-                    GITHUB_REPO,
-                    forceCheck,
-                ),
-            )
+        // return withIOContext {
+        //     val result = getApplicationRelease.await(
+        //         GetApplicationRelease.Arguments(
+        //             isFossBuildType,
+        //             isPreviewBuildType,
+        //             BuildConfig.COMMIT_COUNT.toInt(),
+        //             BuildConfig.VERSION_NAME,
+        //             GITHUB_REPO,
+        //             forceCheck,
+        //         ),
+        //     )
 
-            when (result) {
-                is GetApplicationRelease.Result.NewUpdate -> AppUpdateNotifier(context).promptUpdate(result.release)
-                else -> {}
-            }
+        //     when (result) {
+        //         is GetApplicationRelease.Result.NewUpdate -> AppUpdateNotifier(context).promptUpdate(result.release)
+        //         else -> {}
+        //     }
 
-            result
-        }
+        //     result
+        // }
+        return GetApplicationRelease.Result.NoNewUpdate
     }
 }
 
 val GITHUB_REPO: String by lazy {
     if (isPreviewBuildType) {
-        "mihonapp/mihon-preview"
+        "WalterStager/mihon-ws"
     } else {
-        "mihonapp/mihon"
+        "WalterStager/mihon-ws"
     }
 }
 
