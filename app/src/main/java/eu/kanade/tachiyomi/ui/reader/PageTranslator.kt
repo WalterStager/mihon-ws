@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.RectF
 import android.text.StaticLayout
 import android.text.TextPaint
@@ -56,40 +57,102 @@ class PageTranslator {
     }
 
     /**
-     * OCR + threshold check. All detected blocks are returned; blocks that fail the size
-     * filter have [TextBlock.meetsThreshold] = false.
+     * OCR → merge nearby fragments → threshold filter.
+     * All returned blocks have [TextBlock.meetsThreshold] set; filtered-out blocks are still
+     * included so bounding-box visualisation can show them in a different colour.
      */
     private fun detect(bitmap: Bitmap): List<TextBlock> {
         val scaled = bitmap.scaleToMax(MAX_OCR_DIM)
         val visionText = Tasks.await(recognizer.process(InputImage.fromBitmap(scaled, 0)))
-        val raw = visionText.textBlocks.mapIndexedNotNull { i, block ->
+
+        val detections = visionText.textBlocks.mapIndexedNotNull { i, block ->
             val box = block.boundingBox ?: run {
                 logcat(LogPriority.WARN) { "detect: block[$i] null box, skipping" }
                 return@mapIndexedNotNull null
             }
-            box to block
+            Detection(Rect(box), block.text, block.lines.size.coerceAtLeast(1))
         }
-        if (raw.isEmpty()) return emptyList()
-        val dims = raw.map { (box, _) -> box.width().toFloat() to box.height().toFloat() }
+        if (detections.isEmpty()) return emptyList()
+
         // Vertical JP columns are taller than wide; horizontal lines are wider than tall.
+        val dims = detections.map { it.box.width().toFloat() to it.box.height().toFloat() }
         val isVertical = dims.count { (w, h) -> h > w } > dims.size / 2
-        // Compare column breadth for vertical text, line height for horizontal text.
-        val keyDims = dims.map { (w, h) -> if (isVertical) w else h }
+
+        val merged = mergeNearby(detections, isVertical)
+
+        // Key dimension: column breadth for vertical, line height for horizontal.
+        val keyDims = merged.map { if (isVertical) it.box.width().toFloat() else it.box.height().toFloat() }
         val median = keyDims.sorted()[keyDims.size / 2]
         val threshold = median * 0.5f
-        return raw.mapIndexed { i, (box, block) ->
+
+        return merged.mapIndexed { i, det ->
             TextBlock(
-                text = block.text,
-                leftFrac = box.left.toFloat() / scaled.width,
-                topFrac = box.top.toFloat() / scaled.height,
-                rightFrac = box.right.toFloat() / scaled.width,
-                bottomFrac = box.bottom.toFloat() / scaled.height,
-                isVertical = box.height() > box.width(),
-                lineCount = block.lines.size.coerceAtLeast(1),
+                text = det.text,
+                leftFrac = det.box.left.toFloat() / scaled.width,
+                topFrac = det.box.top.toFloat() / scaled.height,
+                rightFrac = det.box.right.toFloat() / scaled.width,
+                bottomFrac = det.box.bottom.toFloat() / scaled.height,
+                isVertical = det.box.height() > det.box.width(),
+                lineCount = det.lineCount,
                 meetsThreshold = keyDims[i] >= threshold,
             )
         }
     }
+
+    /**
+     * Merge OCR fragments that belong to the same text column/paragraph.
+     */
+    private fun mergeNearby(detections: List<Detection>, isVertical: Boolean): List<Detection> {
+        val n = detections.size
+        if (n <= 1) return detections
+
+        val keyDims = detections.map { if (isVertical) it.box.width().toFloat() else it.box.height().toFloat() }
+        val median = keyDims.sorted()[n / 2]
+        val alignTolerance = median * 0.5f  // blocks can be this far apart on the alignment axis
+        val gapLimit = median * 2.0f        // max gap on the reading axis
+
+        // Union-find with path compression.
+        val parent = IntArray(n) { it }
+        fun find(x: Int): Int {
+            var r = x
+            while (parent[r] != r) r = parent[r]
+            var c = x
+            while (c != r) { val t = parent[c]; parent[c] = r; c = t }
+            return r
+        }
+
+        for (i in 0 until n) {
+            for (j in i + 1 until n) {
+                val a = detections[i].box
+                val b = detections[j].box
+                val shouldMerge = if (isVertical) {
+                    // Same column: x-separation within tolerance, y-gap within limit.
+                    val xSep = (maxOf(a.left, b.left) - minOf(a.right, b.right)).toFloat()
+                    val yGap = maxOf(0, maxOf(a.top, b.top) - minOf(a.bottom, b.bottom)).toFloat()
+                    xSep < alignTolerance && yGap <= gapLimit
+                } else {
+                    // Same paragraph: y-separation within tolerance, x-gap within limit.
+                    val ySep = (maxOf(a.top, b.top) - minOf(a.bottom, b.bottom)).toFloat()
+                    val xGap = maxOf(0, maxOf(a.left, b.left) - minOf(a.right, b.right)).toFloat()
+                    ySep < alignTolerance && xGap <= gapLimit
+                }
+                if (shouldMerge) parent[find(i)] = find(j)
+            }
+        }
+
+        return (0 until n).groupBy { find(it) }.values.map { group ->
+            val boxes = group.map { detections[it].box }
+            // Sort sub-blocks in reading order before joining text.
+            val ordered = group.sortedBy { detections[it].box.top }
+            Detection(
+                box = Rect(boxes.minOf { it.left }, boxes.minOf { it.top }, boxes.maxOf { it.right }, boxes.maxOf { it.bottom }),
+                text = ordered.joinToString("\n") { detections[it].text },
+                lineCount = group.sumOf { detections[it].lineCount },
+            )
+        }
+    }
+
+    private data class Detection(val box: Rect, val text: String, val lineCount: Int)
 
     fun drawBoundingBoxes(bitmap: Bitmap, blocks: List<TextBlock>): Bitmap {
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
