@@ -19,12 +19,15 @@ import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
 import logcat.LogPriority
 import tachiyomi.core.common.util.system.logcat
 
-data class TranslatedBlock(
+data class TextBlock(
     val text: String,
     val leftFrac: Float,
     val topFrac: Float,
     val rightFrac: Float,
     val bottomFrac: Float,
+    val isVertical: Boolean = false,
+    val lineCount: Int = 1,
+    val meetsThreshold: Boolean = true,
 )
 
 class PageTranslator {
@@ -41,61 +44,128 @@ class PageTranslator {
         Tasks.await(translator.downloadModelIfNeeded(DownloadConditions.Builder().build()))
     }
 
+    /** Blocking — call from a background thread only. OCR only, no translation. */
+    fun detectBlocks(bitmap: Bitmap): List<TextBlock> = detect(bitmap)
+
     /** Blocking — call from a background thread only. */
-    fun translate(bitmap: Bitmap): List<TranslatedBlock> {
+    fun translate(block: TextBlock): String {
+        logcat { "translate: '${block.text.take(40)}'" }
+        val translated = Tasks.await(translator.translate(block.text))
+        logcat { "translate: → '${translated.take(40)}'" }
+        return translated
+    }
+
+    /**
+     * OCR + threshold check. All detected blocks are returned; blocks that fail the size
+     * filter have [TextBlock.meetsThreshold] = false.
+     */
+    private fun detect(bitmap: Bitmap): List<TextBlock> {
         val scaled = bitmap.scaleToMax(MAX_OCR_DIM)
         val visionText = Tasks.await(recognizer.process(InputImage.fromBitmap(scaled, 0)))
-        return visionText.textBlocks.mapIndexedNotNull { i, block ->
+        val raw = visionText.textBlocks.mapIndexedNotNull { i, block ->
             val box = block.boundingBox ?: run {
-                logcat(LogPriority.WARN) { "translate: block[$i] null box, skipping" }
+                logcat(LogPriority.WARN) { "detect: block[$i] null box, skipping" }
                 return@mapIndexedNotNull null
             }
-            logcat { "translate: block[$i] '${block.text.take(40)}'" }
-            val translated = Tasks.await(translator.translate(block.text))
-            logcat { "translate: block[$i] → '${translated.take(40)}'" }
-            TranslatedBlock(
-                text = translated,
+            box to block
+        }
+        if (raw.isEmpty()) return emptyList()
+        val dims = raw.map { (box, _) -> box.width().toFloat() to box.height().toFloat() }
+        // Vertical JP columns are taller than wide; horizontal lines are wider than tall.
+        val isVertical = dims.count { (w, h) -> h > w } > dims.size / 2
+        // Compare column breadth for vertical text, line height for horizontal text.
+        val keyDims = dims.map { (w, h) -> if (isVertical) w else h }
+        val median = keyDims.sorted()[keyDims.size / 2]
+        val threshold = median * 0.5f
+        return raw.mapIndexed { i, (box, block) ->
+            TextBlock(
+                text = block.text,
                 leftFrac = box.left.toFloat() / scaled.width,
                 topFrac = box.top.toFloat() / scaled.height,
                 rightFrac = box.right.toFloat() / scaled.width,
                 bottomFrac = box.bottom.toFloat() / scaled.height,
+                isVertical = box.height() > box.width(),
+                lineCount = block.lines.size.coerceAtLeast(1),
+                meetsThreshold = keyDims[i] >= threshold,
             )
         }
     }
 
-    fun annotate(bitmap: Bitmap, blocks: List<TranslatedBlock>): Bitmap {
+    fun drawBoundingBoxes(bitmap: Bitmap, blocks: List<TextBlock>): Bitmap {
+        val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(result)
+        val redPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.RED
+            style = Paint.Style.STROKE
+            strokeWidth = 4f
+        }
+        val bluePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLUE
+            style = Paint.Style.STROKE
+            strokeWidth = 4f
+        }
+        blocks.forEach { block ->
+            canvas.drawRect(
+                RectF(
+                    block.leftFrac * result.width,
+                    block.topFrac * result.height,
+                    block.rightFrac * result.width,
+                    block.bottomFrac * result.height,
+                ),
+                if (block.meetsThreshold) redPaint else bluePaint,
+            )
+        }
+        return result
+    }
+
+    fun annotate(bitmap: Bitmap, blocks: List<TextBlock>): Bitmap {
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(result)
         val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.argb(220, 255, 255, 255)
             style = Paint.Style.FILL
         }
-        blocks.forEach { block ->
+        blocks.filter { it.meetsThreshold }.forEach { block ->
+            val translatedText = translate(block)
             val rect = RectF(
                 block.leftFrac * result.width,
                 block.topFrac * result.height,
                 block.rightFrac * result.width,
                 block.bottomFrac * result.height,
             )
-            val boxW = rect.width().coerceAtLeast(1f).toInt()
             canvas.drawRect(rect, bgPaint)
+            val lineHeight = if (block.isVertical) rect.width() / block.lineCount else rect.height() / block.lineCount
             val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = Color.BLACK
-                textSize = (rect.height() / 2f).coerceIn(12f, 48f)
+                textSize = (lineHeight * 0.7f).coerceIn(12f, 48f)
             }
-            val layout = StaticLayout.Builder
-                .obtain(block.text, 0, block.text.length, textPaint, boxW)
-                .build()
-            canvas.save()
-            canvas.translate(rect.left, rect.top + (rect.height() - layout.height) / 2f)
-            layout.draw(canvas)
-            canvas.restore()
+            if (block.isVertical) {
+                // Rotate 90° CW: translate(right, top) + rotate(90°) makes local +x = screen down,
+                // local +y = screen left. Layout width = block height fills the column top-to-bottom.
+                val layout = StaticLayout.Builder
+                    .obtain(translatedText, 0, translatedText.length, textPaint, rect.height().coerceAtLeast(1f).toInt())
+                    .build()
+                canvas.save()
+                canvas.translate(rect.right, rect.top)
+                canvas.rotate(90f)
+                canvas.translate(0f, (rect.width() - layout.height).coerceAtLeast(0f) / 2f)
+                layout.draw(canvas)
+                canvas.restore()
+            } else {
+                val layout = StaticLayout.Builder
+                    .obtain(translatedText, 0, translatedText.length, textPaint, rect.width().coerceAtLeast(1f).toInt())
+                    .build()
+                canvas.save()
+                canvas.translate(rect.left, rect.top + (rect.height() - layout.height) / 2f)
+                layout.draw(canvas)
+                canvas.restore()
+            }
         }
         return result
     }
 
     companion object {
-        private const val MAX_OCR_DIM = 1920
+        private const val MAX_OCR_DIM = 3840
     }
 
     fun close() {

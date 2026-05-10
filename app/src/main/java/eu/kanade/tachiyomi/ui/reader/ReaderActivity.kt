@@ -329,9 +329,19 @@ class ReaderActivity : BaseActivity() {
             is ReaderViewModel.Dialog.PageActions -> {
                 ReaderPageActionsDialog(
                     onDismissRequest = onDismissRequest,
-                    onSetAsCover = viewModel::setAsCover,
-                    onShare = viewModel::shareImage,
-                    onSave = viewModel::saveImage,
+                    onTranslate = {
+                        captureAndProcess { bitmap ->
+                            pageTranslator.prepare()
+                            val blocks = pageTranslator.detectBlocks(bitmap)
+                            pageTranslator.annotate(bitmap, blocks)
+                        }
+                    },
+                    onBoundingBoxes = {
+                        captureAndProcess { bitmap ->
+                            val blocks = pageTranslator.detectBlocks(bitmap)
+                            pageTranslator.drawBoundingBoxes(bitmap, blocks)
+                        }
+                    },
                 )
             }
             null -> {}
@@ -686,7 +696,11 @@ class ReaderActivity : BaseActivity() {
      */
     fun onPageLongTap(page: ReaderPage) {
         logcat { "onPageLongTap: page=${page.number}" }
-        Toast.makeText(this, "Translating…", Toast.LENGTH_SHORT).show()
+        viewModel.openPageDialog(page)
+    }
+
+    private fun captureAndProcess(processor: (android.graphics.Bitmap) -> android.graphics.Bitmap) {
+        Toast.makeText(this, "Processing…", Toast.LENGTH_SHORT).show()
         val container = binding.viewerContainer
         val location = IntArray(2)
         container.getLocationInWindow(location)
@@ -701,9 +715,7 @@ class ReaderActivity : BaseActivity() {
             }
             Thread {
                 try {
-                    pageTranslator.prepare()
-                    val blocks = pageTranslator.translate(captureBitmap)
-                    val annotated = pageTranslator.annotate(captureBitmap, blocks)
+                    val annotated = processor(captureBitmap)
                     captureBitmap.recycle()
                     mainHandler.post {
                         val imageView = android.widget.ImageView(this@ReaderActivity).apply {
@@ -719,7 +731,7 @@ class ReaderActivity : BaseActivity() {
                 } catch (e: Exception) {
                     captureBitmap.recycle()
                     mainHandler.post {
-                        Toast.makeText(this@ReaderActivity, "Translation failed: ${e.message}", Toast.LENGTH_LONG).show()
+                        Toast.makeText(this@ReaderActivity, "Processing failed: ${e.message}", Toast.LENGTH_LONG).show()
                     }
                 }
             }.start()
