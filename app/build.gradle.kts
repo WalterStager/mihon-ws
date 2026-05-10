@@ -270,6 +270,10 @@ dependencies {
     implementation(libs.bundles.markdown)
     implementation(libs.materialKolor)
 
+    // OCR + Translation
+    implementation("com.google.mlkit:text-recognition-japanese:16.0.1")
+    implementation("com.google.mlkit:translate:17.0.3")
+
     // Logging
     implementation(libs.logcat)
 

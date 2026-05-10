@@ -6,6 +6,10 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Rect
+import android.os.Handler
+import android.os.Looper
+import android.view.PixelCopy
 import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
@@ -136,6 +140,8 @@ class ReaderActivity : BaseActivity() {
     private val windowInsetsController by lazy { WindowInsetsControllerCompat(window, window.decorView) }
 
     private var loadingIndicator: ReaderProgressIndicator? = null
+
+    private val pageTranslator = PageTranslator()
 
     var isScrollingThroughPages = false
         private set
@@ -338,6 +344,7 @@ class ReaderActivity : BaseActivity() {
     override fun onDestroy() {
         super.onDestroy()
         viewModel.state.value.viewer?.destroy()
+        pageTranslator.close()
         config = null
         menuToggleToast?.cancel()
         readingModeToast?.cancel()
@@ -678,7 +685,45 @@ class ReaderActivity : BaseActivity() {
      * actions to perform is shown.
      */
     fun onPageLongTap(page: ReaderPage) {
-        Toast.makeText(this, "Long tap: page ${page.number}", Toast.LENGTH_SHORT).show()
+        logcat { "onPageLongTap: page=${page.number}" }
+        Toast.makeText(this, "Translating…", Toast.LENGTH_SHORT).show()
+        val container = binding.viewerContainer
+        val location = IntArray(2)
+        container.getLocationInWindow(location)
+        val srcRect = Rect(location[0], location[1], location[0] + container.width, location[1] + container.height)
+        val captureBitmap = android.graphics.Bitmap.createBitmap(container.width, container.height, android.graphics.Bitmap.Config.ARGB_8888)
+        val mainHandler = Handler(Looper.getMainLooper())
+        PixelCopy.request(window, srcRect, captureBitmap, { result ->
+            if (result != PixelCopy.SUCCESS) {
+                Toast.makeText(this, "Capture failed: $result", Toast.LENGTH_SHORT).show()
+                captureBitmap.recycle()
+                return@request
+            }
+            Thread {
+                try {
+                    pageTranslator.prepare()
+                    val blocks = pageTranslator.translate(captureBitmap)
+                    val annotated = pageTranslator.annotate(captureBitmap, blocks)
+                    captureBitmap.recycle()
+                    mainHandler.post {
+                        val imageView = android.widget.ImageView(this@ReaderActivity).apply {
+                            setImageBitmap(annotated)
+                            scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                            adjustViewBounds = true
+                        }
+                        android.app.AlertDialog.Builder(this@ReaderActivity)
+                            .setView(imageView)
+                            .setOnDismissListener { annotated.recycle() }
+                            .show()
+                    }
+                } catch (e: Exception) {
+                    captureBitmap.recycle()
+                    mainHandler.post {
+                        Toast.makeText(this@ReaderActivity, "Translation failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }.start()
+        }, mainHandler)
     }
 
     /**
