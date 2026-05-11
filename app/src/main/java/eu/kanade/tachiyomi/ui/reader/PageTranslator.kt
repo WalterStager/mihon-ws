@@ -29,6 +29,7 @@ data class TextBlock(
 )
 
 class PageTranslator {
+    private val thresholdMult = 0.65f
     private val recognizer = TextRecognition.getClient(JapaneseTextRecognizerOptions.Builder().build())
     private val translator = Translation.getClient(
         TranslatorOptions.Builder()
@@ -37,6 +38,8 @@ class PageTranslator {
             .build(),
     )
 
+    private data class Detection(val box: Rect, val text: String, val lineCount: Int)
+
     /** Blocking — call from a background thread only. */
     fun prepare() {
         Tasks.await(translator.downloadModelIfNeeded(DownloadConditions.Builder().build()))
@@ -44,7 +47,7 @@ class PageTranslator {
 
     /** Blocking — call from a background thread only. */
     fun translate(block: TextBlock): String {
-        val newText = block.text.replace('\n', ' ')
+        val newText = block.text.replace(Regex("\\s"), "")
         logcat { "translate: '${newText}'" }
         val translated = Tasks.await(translator.translate(newText))
         logcat { "translate: → '${translated}'" }
@@ -56,7 +59,11 @@ class PageTranslator {
      * All returned blocks have [TextBlock.meetsThreshold] set; filtered-out blocks are still
      * included so bounding-box visualisation can show them in a different colour.
      */
-    fun detectBlocks(bitmap: Bitmap, merge: Boolean): List<TextBlock> {
+    fun detectBlocks(
+        bitmap: Bitmap,
+        merge: Boolean,
+        forceVertical: Boolean? = null
+    ): List<TextBlock> {
         val scaled = bitmap.scaleToMax(MAX_OCR_DIM)
         val visionText = Tasks.await(recognizer.process(InputImage.fromBitmap(scaled, 0)))
 
@@ -71,21 +78,23 @@ class PageTranslator {
 
         // Vertical JP columns are taller than wide; horizontal lines are wider than tall.
         val dims = detections.map { it.box.width().toFloat() to it.box.height().toFloat() }
-        val isVertical = dims.count { (w, h) -> h > w } > dims.size / 2
+        val isVertical = forceVertical ?: (dims.count { (w, h) -> h > w } > dims.size / 2)
 
-        val merged = if (merge) mergeNearby(detections, isVertical) else detections
+        // reverse OCR line order for RTL reading direction.
+        val oriented = if (isVertical) {
+            detections.map { it.copy(text = it.text.split('\n').reversed().joinToString("\n")) }
+        } else {
+            detections
+        }
+
+        val merged = if (merge) mergeNearby(oriented, isVertical) else oriented
         // Key dimension: column breadth for vertical, line height for horizontal.
         val keyDims = merged.map {
-            if (isVertical) {
-                it.box.width().toFloat() / it.lineCount.toFloat()
-            }
-            else {
-                it.box.height().toFloat() / it.lineCount.toFloat()
-            }
+            if (isVertical) it.box.width().toFloat() / it.lineCount else it.box.height().toFloat() / it.lineCount
         }
         val median = keyDims.sorted()[keyDims.size / 2]
-        val threshold = median * 0.5f
-        return merged.mapIndexed { i, det ->
+        val threshold = median * thresholdMult
+        val blocks = merged.mapIndexed { i, det ->
             TextBlock(
                 text = det.text,
                 box = RectF(
@@ -94,11 +103,13 @@ class PageTranslator {
                     det.box.right.toFloat() / scaled.width,
                     det.box.bottom.toFloat() / scaled.height,
                 ),
-                isVertical = det.box.height() > det.box.width(),
+                isVertical = forceVertical ?: (det.box.height() > det.box.width()),
                 lineCount = det.lineCount,
                 meetsThreshold = keyDims[i] >= threshold,
             )
         }
+        // Sort into reading order so translated blocks appear in sequence.
+        return blocks
     }
 
     /**
@@ -118,7 +129,7 @@ class PageTranslator {
             }
         }
         val median = keyDims.sorted()[keyDims.size / 2]
-        val threshold = median * 0.5f
+        val threshold = median * thresholdMult
         val alignTolerance = median * 1.5f  // blocks can be this far apart on the alignment axis
         val gapLimit = median * 0.25f       // max gap on the reading axis
 
@@ -156,16 +167,26 @@ class PageTranslator {
         return (0 until n).groupBy { find(it) }.values.map { group ->
             val boxes = group.map { detections[it].box }
             // Sort sub-blocks in reading order before joining text.
-            val ordered = group.sortedBy { detections[it].box.top }
+            val ordered = if (isVertical) {
+                group.sortedByDescending { detections[it].box.left }
+            } else {
+                group.sortedBy { detections[it].box.left }
+            }
+            val mergedBox = Rect(boxes.minOf { it.left }, boxes.minOf { it.top }, boxes.maxOf { it.right }, boxes.maxOf { it.bottom })
+            if (group.size > 1) {
+                logcat { "mergeNearby: @@merging ${group.size} blocks → [${mergedBox.left},${mergedBox.top},${mergedBox.right},${mergedBox.bottom}]" }
+                ordered.forEach { idx ->
+                    val b = detections[idx].box
+                    logcat { "  @@[${b.left},${b.top},${b.right},${b.bottom}] '${detections[idx].text.take(40)}'" }
+                }
+            }
             Detection(
-                box = Rect(boxes.minOf { it.left }, boxes.minOf { it.top }, boxes.maxOf { it.right }, boxes.maxOf { it.bottom }),
+                box = mergedBox,
                 text = ordered.joinToString("\n") { detections[it].text },
                 lineCount = group.sumOf { detections[it].lineCount },
             )
         }
     }
-
-    private data class Detection(val box: Rect, val text: String, val lineCount: Int)
 
     fun drawBoundingBoxes(bitmap: Bitmap, blocks: List<TextBlock>): Bitmap {
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
@@ -210,7 +231,7 @@ class PageTranslator {
                 block.box.bottom * result.height,
             )
             canvas.drawRect(rect, bgPaint)
-            val lineHeight = if (block.isVertical) rect.width() / block.lineCount else rect.height() / block.lineCount
+            val lineHeight = (if (block.isVertical) rect.width() else rect.height()) / block.lineCount
             val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = Color.BLACK
                 textSize = (lineHeight * 0.8f).coerceIn(12f, 48f)

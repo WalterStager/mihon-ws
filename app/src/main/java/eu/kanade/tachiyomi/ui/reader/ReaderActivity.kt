@@ -329,22 +329,22 @@ class ReaderActivity : BaseActivity() {
             is ReaderViewModel.Dialog.PageActions -> {
                 ReaderPageActionsDialog(
                     onDismissRequest = onDismissRequest,
-                    onTranslate = {
+                    onTranslate = { isVertical ->
                         captureAndProcess { bitmap ->
                             pageTranslator.prepare()
-                            val blocks = pageTranslator.detectBlocks(bitmap, true)
+                            val blocks = pageTranslator.detectBlocks(bitmap, merge = true, forceVertical = isVertical)
                             pageTranslator.annotate(bitmap, blocks)
                         }
                     },
-                    onBoundingBoxes = {
+                    onBoundingBoxes = { isVertical ->
                         captureAndProcess { bitmap ->
-                            val blocks = pageTranslator.detectBlocks(bitmap, true)
+                            val blocks = pageTranslator.detectBlocks(bitmap, merge = true, forceVertical = isVertical)
                             pageTranslator.drawBoundingBoxes(bitmap, blocks)
                         }
                     },
-                    onBoundingBoxesNoMerge = {
+                    onBoundingBoxesNoMerge = { isVertical ->
                         captureAndProcess { bitmap ->
-                            val blocks = pageTranslator.detectBlocks(bitmap, false)
+                            val blocks = pageTranslator.detectBlocks(bitmap, merge = false, forceVertical = isVertical)
                             pageTranslator.drawBoundingBoxes(bitmap, blocks)
                         }
                     },
