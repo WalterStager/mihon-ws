@@ -19,6 +19,7 @@ fun ReaderPageActionsDialog(
     onDismissRequest: () -> Unit,
     onTranslate: () -> Unit,
     onBoundingBoxes: () -> Unit,
+    onBoundingBoxesNoMerge: () -> Unit,
 ) {
     AdaptiveSheet(onDismissRequest = onDismissRequest) {
         Row(
@@ -40,6 +41,15 @@ fun ReaderPageActionsDialog(
                 icon = Icons.Outlined.CropFree,
                 onClick = {
                     onBoundingBoxes()
+                    onDismissRequest()
+                },
+            )
+            ActionButton(
+                modifier = Modifier.weight(1f),
+                title = "No merge",
+                icon = Icons.Outlined.CropFree,
+                onClick = {
+                    onBoundingBoxesNoMerge()
                     onDismissRequest()
                 },
             )

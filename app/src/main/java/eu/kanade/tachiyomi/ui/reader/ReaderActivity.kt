@@ -332,13 +332,19 @@ class ReaderActivity : BaseActivity() {
                     onTranslate = {
                         captureAndProcess { bitmap ->
                             pageTranslator.prepare()
-                            val blocks = pageTranslator.detectBlocks(bitmap)
+                            val blocks = pageTranslator.detectBlocks(bitmap, true)
                             pageTranslator.annotate(bitmap, blocks)
                         }
                     },
                     onBoundingBoxes = {
                         captureAndProcess { bitmap ->
-                            val blocks = pageTranslator.detectBlocks(bitmap)
+                            val blocks = pageTranslator.detectBlocks(bitmap, true)
+                            pageTranslator.drawBoundingBoxes(bitmap, blocks)
+                        }
+                    },
+                    onBoundingBoxesNoMerge = {
+                        captureAndProcess { bitmap ->
+                            val blocks = pageTranslator.detectBlocks(bitmap, false)
                             pageTranslator.drawBoundingBoxes(bitmap, blocks)
                         }
                     },
